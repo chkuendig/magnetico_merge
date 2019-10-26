@@ -14,4 +14,4 @@ The `MERGED_DB` will be merged into `MAIN_DB`.
 
 It requires python >= 3.6 and [click](https://click.palletsprojects.com/en/7.x/)
 
-Havve fun.
+Have fun.
