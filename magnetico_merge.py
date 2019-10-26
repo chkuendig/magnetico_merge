@@ -97,10 +97,11 @@ def main(main_db, merged_db):
             except sqlite3.IntegrityError:
                 failed_count += 1
 
+    click.echo("Comitting… ", nl=False)
+    connection.commit()
     click.echo(
-        f"{total_merged} torrents processed. {failed_count} torrents were not merged due to errors."
+        f"OK. {total_merged} torrents processed. {failed_count} torrents were not merged due to errors."
     )
-    connection.rollback()
     connection.close()
 
 
