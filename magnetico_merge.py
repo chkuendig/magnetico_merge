@@ -81,12 +81,13 @@ def main(main_db, merged_db):
 
     cursor.execute("BEGIN")
     with click.progressbar(
-        cursor.execute("SELECT * FROM merged_db.torrents"),
         length=total_merged,
         width=0,
         show_pos=True,
     ) as bar:
-        for row in bar:
+        for i, row in enumerate(cursor.execute("SELECT * FROM merged_db.torrents")):
+            if i % 1000 == 0:
+                bar.update(1000)
             try:
                 torrent_merge = connection.execute(
                     "INSERT INTO torrents (info_hash, name, total_size, discovered_on, updated_on, n_seeders, n_leechers, modified_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
