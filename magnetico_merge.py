@@ -4,7 +4,7 @@ import sqlite3
 import sys
 
 import click
-import tqdm
+
 
 """
 Schema:
@@ -70,24 +70,36 @@ def main(main_db, merged_db):
     connection = sqlite3.connect(main_db)
     connection.row_factory = sqlite3.Row
     connection.text_factory = bytes
+
     cursor = connection.cursor()
     cursor.execute("ATTACH ? AS merged_db", (merged_db,))
+    click.echo("Gathering database statistics: ", nl=False)
+    cursor.execute("SELECT count(*) from merged_db.torrents")
+    total_merged = cursor.fetchone()[0]
+    click.echo(f"{total_merged} torrents to merge.")
+    failed_count = 0
 
     cursor.execute("BEGIN")
-    for row in cursor.execute("SELECT * FROM merged_db.torrents"):
-        click.echo(f"Merging torrents {row['id']}: ", nl=False)
-        try:
-            torrent_merge = connection.execute(
-                "INSERT INTO torrents (info_hash, name, total_size, discovered_on, updated_on, n_seeders, n_leechers, modified_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (*row[1:],),
-            )
-            click.echo("OK, merging files: ", nl=False)
-            # Now merge files
-            merge_files(connection, row["id"], torrent_merge.lastrowid)
-            click.echo("OK")
-        except sqlite3.IntegrityError:
-            print("Failed")
+    with click.progressbar(
+        cursor.execute("SELECT * FROM merged_db.torrents"),
+        length=total_merged,
+        width=0,
+        show_pos=True,
+    ) as bar:
+        for row in bar:
+            try:
+                torrent_merge = connection.execute(
+                    "INSERT INTO torrents (info_hash, name, total_size, discovered_on, updated_on, n_seeders, n_leechers, modified_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (*row[1:],),
+                )
+                # Now merge files
+                merge_files(connection, row["id"], torrent_merge.lastrowid)
+            except sqlite3.IntegrityError:
+                failed_count += 1
 
+    click.echo(
+        f"{total_merged} torrents processed. {failed_count} torrents were not merged due to errors."
+    )
     connection.rollback()
     connection.close()
 
