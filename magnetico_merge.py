@@ -52,16 +52,6 @@ CREATE INDEX modified_on_index ON torrents (modified_on);
 """
 
 
-def merge_files(connection, old_torrent_id, new_torrent_id):
-    for row in connection.execute(
-        "SELECT * from merged_db.files where torrent_id = ?", (old_torrent_id,)
-    ):
-        connection.execute(
-            "INSERT INTO files (torrent_id, size, path) VALUES (?, ?, ?)",
-            (new_torrent_id, row["size"], row["path"]),
-        )
-
-
 @click.command()
 @click.argument("main-db")
 @click.argument("merged-db")
@@ -74,27 +64,37 @@ def main(main_db, merged_db):
     cursor = connection.cursor()
     cursor.execute("ATTACH ? AS merged_db", (merged_db,))
     click.echo("Gathering database statistics: ", nl=False)
+
     cursor.execute("SELECT count(*) from merged_db.torrents")
     total_merged = cursor.fetchone()[0]
+    cursor.execute(
+        "SELECT name FROM pragma_table_info('files') WHERE name not in ('id', 'torrent_id')"
+    )
+    remaining_file_colums = [row[0].decode() for row in cursor]
+    cursor.execute(
+        "SELECT name FROM pragma_table_info('torrents') WHERE name not in ('id')"
+    )
+    remaining_torrent_colums = [row[0].decode() for row in cursor]
+
     click.echo(f"{total_merged} torrents to merge.")
+
+    insert_files_statement = f"INSERT INTO files (torrent_id, {','.join(remaining_file_colums)}) SELECT ?, {','.join(remaining_file_colums)} FROM merged_db.files WHERE torrent_id = ?"
+    insert_torrents_statement = f"INSERT INTO torrents ({','.join(remaining_torrent_colums)}) VALUES ({','.join('?' * len(remaining_torrent_colums))})"
     failed_count = 0
 
     cursor.execute("BEGIN")
-    with click.progressbar(
-        length=total_merged,
-        width=0,
-        show_pos=True,
-    ) as bar:
+    with click.progressbar(length=total_merged, width=0, show_pos=True) as bar:
         for i, row in enumerate(cursor.execute("SELECT * FROM merged_db.torrents")):
             if i % 1000 == 0:
                 bar.update(1000)
             try:
                 torrent_merge = connection.execute(
-                    "INSERT INTO torrents (info_hash, name, total_size, discovered_on, updated_on, n_seeders, n_leechers, modified_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (*row[1:],),
+                    insert_torrents_statement, (*row[1:],)
                 )
                 # Now merge files
-                merge_files(connection, row["id"], torrent_merge.lastrowid)
+                connection.execute(
+                    insert_files_statement, (torrent_merge.lastrowid, row["id"])
+                )
             except sqlite3.IntegrityError:
                 failed_count += 1
 
