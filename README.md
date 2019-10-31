@@ -1,7 +1,7 @@
 Merge magnetico databases
 =========================
 
-Very simple script to merge databases created by magnetico >=0.8
+Very simple script to merge databases created by [magnetico](https://github.com/boramalper/magnetico) >=0.8
 
 ```
 Usage: magnetico_merge.py [OPTIONS] MAIN_DB MERGED_DB
