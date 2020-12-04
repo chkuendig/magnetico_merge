@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import pathlib
 
-from typing import Union
+from typing import Union, List, Dict, Tuple
 
 import click
 
@@ -197,7 +197,7 @@ class Merger:
         )
         return select_cursor
 
-    def select_merged_files_m(self, torrent_ids: tuple[int], arraysize=1000):
+    def select_merged_files_m(self, torrent_ids: Tuple[int], arraysize=1000):
         select_cursor = self.merged_connection.cursor()
         select_cursor.arraysize = arraysize
         select_cursor.execute(
@@ -208,8 +208,8 @@ class Merger:
         return select_cursor
 
     def merge_entries(
-        self, torrents: list[dict]
-    ) -> dict[Union["inserted", "failed"], int]:
+        self, torrents: List[dict]
+    ) -> Dict[Union["inserted", "failed"], int]:
         if self.main_type == "pg":
             result = psycopg2.extras.execute_values(
                 self.main_cursor,
@@ -256,7 +256,7 @@ class Merger:
         else:
             raise click.ClickException("Not supported")
 
-    def merge_files_m(self, torrent_ids: dict[int, int]):
+    def merge_files_m(self, torrent_ids: Dict[int, int]):
         if self.main_type != "pg":
             raise click.ClickException("Not supported")
         select_cursor = self.select_merged_files_m(tuple(torrent_ids.keys()))
