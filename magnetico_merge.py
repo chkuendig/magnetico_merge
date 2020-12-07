@@ -211,15 +211,22 @@ class Merger:
         self, torrents: List[dict]
     ) -> Dict[Union["inserted", "failed"], int]:
         if self.main_type == "pg":
-            result = psycopg2.extras.execute_values(
-                self.main_cursor,
-                self.insert_torrents_statement,
-                [
-                    (*[torrent[column] for column in self.torrent_columns],)
-                    for torrent in torrents
-                ],
-                fetch=True,
-            )
+            try:
+                result = psycopg2.extras.execute_values(
+                    self.main_cursor,
+                    self.insert_torrents_statement,
+                    [
+                        (*[torrent[column] for column in self.torrent_columns],)
+                        for torrent in torrents
+                    ],
+                    fetch=True,
+                )
+            except ValueError as e:
+                if '0x00' in str(e):
+                    for torrent in torrents:
+                        torrent['name'] = torrent['name'].replace('\x00', '')
+                    # Retry
+                    return self.merge_entries(torrents)
             self.merge_files_m(
                 {
                     torrent["id"]: one_result[0]
