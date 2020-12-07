@@ -207,6 +207,14 @@ class Merger:
         )
         return select_cursor
 
+    def fix_torrents(self, torrents: List[dict]):
+        # Make a dict copy to be able to modify it
+        torrents = [dict(torrent) for torrent in torrents]
+        for torrent in torrents:
+            torrent['name'] = torrent['name'].replace('\x00', '')
+        return torrents
+
+
     def merge_entries(
         self, torrents: List[dict]
     ) -> Dict[Union["inserted", "failed"], int]:
@@ -223,10 +231,7 @@ class Merger:
                 )
             except ValueError as e:
                 if '0x00' in str(e):
-                    for torrent in torrents:
-                        torrent['name'] = torrent['name'].replace('\x00', '')
-                    # Retry
-                    return self.merge_entries(torrents)
+                    return self.merge_entries(self.fix_torrents(torrents))
             self.merge_files_m(
                 {
                     torrent["id"]: one_result[0]
