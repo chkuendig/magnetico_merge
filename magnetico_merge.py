@@ -14,6 +14,8 @@ try:
 except ImportError:
     psycopg2 = None
 
+# 4204942: b'\x00\x00\x02\x0100\x00'
+# 10196786: b'\xff\xfe1\x00'
 
 """
 Schema:
@@ -207,12 +209,13 @@ class Merger:
         )
         return select_cursor
 
-    def fix_torrents(self, torrents: List[dict]):
+    def remove_nul_bytes(self, rows: List[dict], column: str):
+        click.secho(f"Removing null bytes from {len(rows)} rows", fg="yellow")
         # Make a dict copy to be able to modify it
-        torrents = [dict(torrent) for torrent in torrents]
-        for torrent in torrents:
-            torrent["name"] = torrent["name"].replace("\x00", "")
-        return torrents
+        rows = [dict(row) for row in rows]
+        for row in rows:
+            row[column] = row[column].replace("\x00", "")
+        return rows
 
     def merge_entries(
         self, torrents: List[dict]
@@ -230,7 +233,7 @@ class Merger:
                 )
             except ValueError as e:
                 if "0x00" in str(e):
-                    return self.merge_entries(self.fix_torrents(torrents))
+                    return self.merge_entries(self.remove_nul_bytes(torrents, "name"))
             self.merge_files_m(
                 {
                     torrent["id"]: one_result[0]
@@ -273,18 +276,22 @@ class Merger:
         select_cursor = self.select_merged_files_m(tuple(torrent_ids.keys()))
         files_list = select_cursor.fetchmany()
         while files_list:
-            psycopg2.extras.execute_values(
-                self.main_cursor,
-                self.insert_files_statement,
-                [
-                    (
-                        torrent_ids[merged_file["torrent_id"]],
-                        *[merged_file[column] for column in self.file_columns],
-                    )
-                    for merged_file in files_list
-                ],
-            )
-            files_list = select_cursor.fetchmany()
+            try:
+                psycopg2.extras.execute_values(
+                    self.main_cursor,
+                    self.insert_files_statement,
+                    [
+                        (
+                            torrent_ids[merged_file["torrent_id"]],
+                            *[merged_file[column] for column in self.file_columns],
+                        )
+                        for merged_file in files_list
+                    ],
+                )
+                files_list = select_cursor.fetchmany()
+            except ValueError as e:
+                if "0x00" in str(e):
+                    files_list = self.remove_nul_bytes(files_list, "path")
 
     def placeholder(self, db_type: str):
         return "?" if db_type == "sqlite" else "%s"
