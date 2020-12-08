@@ -211,9 +211,8 @@ class Merger:
         # Make a dict copy to be able to modify it
         torrents = [dict(torrent) for torrent in torrents]
         for torrent in torrents:
-            torrent['name'] = torrent['name'].replace('\x00', '')
+            torrent["name"] = torrent["name"].replace("\x00", "")
         return torrents
-
 
     def merge_entries(
         self, torrents: List[dict]
@@ -230,7 +229,7 @@ class Merger:
                     fetch=True,
                 )
             except ValueError as e:
-                if '0x00' in str(e):
+                if "0x00" in str(e):
                     return self.merge_entries(self.fix_torrents(torrents))
             self.merge_files_m(
                 {
