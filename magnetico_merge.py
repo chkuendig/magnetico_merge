@@ -294,7 +294,7 @@ class Merger:
 @click.argument("main-db")
 @click.argument("merged-db")
 def main(main_db, merged_db):
-    click.echo(f"Merging (NEW) {merged_db} into {main_db}")
+    click.echo(f"Merging {merged_db} into {main_db}")
     merger = Merger(main_db, merged_db)
     click.echo("Gathering database statistics: ", nl=False)
 
