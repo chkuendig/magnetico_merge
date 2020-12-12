@@ -80,6 +80,7 @@ class Database(ABC):
         self.cursor = self.connection.cursor()
 
         self.torrents_table = "torrents"
+        self.options = {}
 
     @classmethod
     def from_dsn(cls, dsn: str, source: Database = None) -> Database:
@@ -99,8 +100,17 @@ class Database(ABC):
             self.connection.close()
             self.connection = None
 
+    def set_options(self, options: dict = {}):
+        self.options = options
+
     @abstractmethod
     def connect(self, dsn: str) -> Connection:
+        pass
+
+    def before_import(self):
+        pass
+
+    def after_import(self):
         pass
 
     @property
@@ -217,11 +227,97 @@ class PostgreSQL(Database):
         super().__init__(dsn, source)
         # For type hints
         self.source = source
+        self.indices = {}
+        self.create_contraint_statements = []
+        self.drop_contraint_statements = []
 
     def connect(self, dsn: str) -> psycopg2._psycopg.connection:
         if psycopg2 is None:
             raise click.ClickException("psycopg2 driver is missing")
         return psycopg2.connect(dsn)
+
+    def generate_constraint_statements(self):
+        # See https://blog.hagander.net/automatically-dropping-and-creating-constraints-131/
+        self.cursor.execute(
+            """
+            SELECT 'ALTER TABLE '||nspname||'.\"'||relname||'\" ADD CONSTRAINT \"'
+                    ||conname||'\" '|| pg_get_constraintdef(pg_constraint.oid)||';'
+            FROM pg_constraint
+            INNER JOIN pg_class ON conrelid=pg_class.oid
+            INNER JOIN pg_namespace ON pg_namespace.oid=pg_class.relnamespace
+            WHERE relname IN ('torrents', 'files') AND conname != 'torrents_info_hash_key'
+            ORDER BY CASE WHEN contype='f' THEN 0 ELSE 1 END DESC,
+                            contype DESC, nspname DESC, relname DESC, conname DESC"""
+        )
+        self.create_contraint_statements = [
+            result[0] for result in self.cursor.fetchall()
+        ]
+
+        self.cursor.execute(
+            """
+            SELECT 'ALTER TABLE "'||nspname||'"."'||relname||'" DROP CONSTRAINT "'||conname||'";'
+            FROM pg_constraint
+            INNER JOIN pg_class ON conrelid=pg_class.oid
+            INNER JOIN pg_namespace ON pg_namespace.oid=pg_class.relnamespace
+            WHERE relname IN ('torrents', 'files') AND conname != 'torrents_info_hash_key'
+            ORDER BY CASE WHEN contype='f' THEN 0 ELSE 1 END, contype, nspname, relname, conname"""
+        )
+        self.drop_contraint_statements = [
+            result[0] for result in self.cursor.fetchall()
+        ]
+
+    def get_indices(self):
+        self.cursor.execute(
+            """SELECT indexname, indexdef FROM pg_indexes
+                        WHERE schemaname = 'public'
+                            AND tablename IN ('torrents', 'files')
+                            AND indexname != 'torrents_info_hash_key'"""
+        )
+        return {result[0]: result[1] for result in self.cursor.fetchall()}
+
+    def before_import(self):
+        with self.connection:
+            self.generate_constraint_statements()
+
+            if self.options.get("fast", False):
+                click.echo(
+                    f"-> Postgresql target, dropping constraints…",
+                    nl=False,
+                )
+                for statement in self.drop_contraint_statements:
+                    self.cursor.execute(statement)
+
+                click.echo(" Done.")
+
+                self.indices = self.get_indices()
+                index_names = self.indices.keys()
+                click.echo(
+                    f"-> Postgresql target, dropping indices: {', '.join(index_names)}…",
+                    nl=False,
+                )
+                self.cursor.execute(f"DROP INDEX {','.join(index_names)}")
+
+                click.echo(" Done.")
+
+    def after_import(self):
+        with self.connection:
+            if self.options.get("fast", False):
+                index_names = self.indices.keys()
+                click.echo(
+                    f"-> Postgresql target, recreating indices: {', '.join(index_names)}…",
+                    nl=False,
+                )
+                for statement in self.indices.values():
+                    self.cursor.execute(statement)
+                click.echo(" Done.")
+
+                click.echo(
+                    f"-> Postgresql target, recreating constraints…",
+                    nl=False,
+                )
+                for statement in self.create_contraint_statements:
+                    self.cursor.execute(statement)
+                click.echo(" Done.")
 
     @cached_property
     def file_columns(self):
@@ -315,13 +411,20 @@ class PostgreSQL(Database):
 
 
 @click.command()
+@click.option(
+    "--fast",
+    is_flag=True,
+    help="Try to go faster, by deleting indices and removing WAL while importing. PostgreSQL only.",
+)
 @click.argument("main-db")
 @click.argument("merged-db")
-def main(main_db, merged_db):
+def main(main_db, merged_db, fast):
     click.echo(f"Merging {merged_db} into {main_db}")
     source = Database.from_dsn(merged_db)
     target = Database.from_dsn(main_db, source)
-    click.echo("Gathering database statistics: ", nl=False)
+    target.set_options({"fast": fast})
+
+    click.echo("-> Gathering source database statistics: ", nl=False)
 
     total_merged = source.torrents_count
     click.echo(f"{total_merged} torrents to merge.")
