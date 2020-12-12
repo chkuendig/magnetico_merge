@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import sqlite3
 import sys
 import pathlib
 
-from typing import Union, List, Dict, Tuple
+from abc import ABC, abstractmethod
+from functools import cached_property
+from typing import Union, Optional, List, Dict, Tuple
 
 import click
 
@@ -62,149 +66,237 @@ CREATE TRIGGER "torrents_modified_on_default_t" AFTER INSERT ON "torrents" BEGIN
 CREATE INDEX modified_on_index ON torrents (modified_on);
 """
 
+Connection = Union[sqlite3.Connection, psycopg2._psycopg.connection]
+Cursor = Union[sqlite3.Cursor, psycopg2._psycopg.cursor]
 
-class Merger:
-    def __init__(self, main_db: str, merged_db: str):
-        self.main_cursor = None
-        self.merged_cursor = None
-        self.main_connection = None
-        self.merged_connection = None
 
-        self.main_connection = self.connect(main_db)
-        self.merged_connection = self.connect(
-            merged_db,
-            self.main_connection
-            if isinstance(self.main_connection, sqlite3.Connection)
-            else None,
-        )
+class Database(ABC):
+    def __init__(self, dsn: str, source: Database = None):
+        self.cursor: Optional[Cursor] = None
+        self.connection: Optional[Connection] = None
+        self.source = source
 
-        self.main_cursor = self.main_connection.cursor()
-        self.merged_cursor = (
-            self.main_cursor
-            if self.same_connection()
-            else self.merged_connection.cursor()
-        )
-        self.merged_type = (
-            "sqlite" if isinstance(self.merged_connection, sqlite3.Connection) else "pg"
-        )
-        self.main_type = (
-            "sqlite" if isinstance(self.main_connection, sqlite3.Connection) else "pg"
-        )
+        self.connection = self.connect(dsn)
+        self.cursor = self.connection.cursor()
 
-        self.prepare_inserts()
+        self.torrents_table = "torrents"
+
+    @classmethod
+    def from_dsn(cls, dsn: str, source: Database = None) -> Database:
+        if dsn.startswith("postgresql://"):
+            return PostgreSQL(dsn, source)
+        elif pathlib.Path(dsn).exists():
+            return SQLite(dsn, source)
 
     def __del__(self):
         self.close()
 
     def close(self):
-        if self.main_cursor is not None:
-            self.main_cursor.close()
-            self.main_cursor = None
-        if self.merged_cursor is not None:
-            self.merged_cursor.close()
-            self.merged_cursor = None
+        if self.cursor is not None:
+            self.cursor.close()
+            self.cursor = None
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
 
-        if self.main_connection is not None:
-            self.main_connection.close()
-            self.main_connection = None
-        if self.merged_connection is not None:
-            self.merged_connection.close()
-            self.merged_connection = None
+    @abstractmethod
+    def connect(self, dsn: str) -> Connection:
+        pass
 
-    def connect(self, db_dsn: str, existing_sqlite: sqlite3.Connection = None):
-        if db_dsn.startswith("postgresql://"):
-            if psycopg2 is None:
-                raise click.ClickException("psycopg2 driver is missing")
-            connection = psycopg2.connect(db_dsn)
-        elif pathlib.Path(db_dsn).exists():
-            if existing_sqlite is not None:
-                with existing_sqlite:  # Shortcut available only in sqlite
-                    existing_sqlite.execute("ATTACH ? AS merged_db", (db_dsn,))
-                connection = existing_sqlite
-            else:
-                connection = sqlite3.connect(db_dsn)
-                connection.row_factory = sqlite3.Row
-                # Some name were inserted invalid. Correct them.
-                connection.text_factory = lambda x: x.decode("utf8", errors="replace")
+    @property
+    def torrents_count(self) -> int:
+        self.cursor.execute("SELECT count(*) from torrents")
+        return self.cursor.fetchone()[0]
+
+    @property
+    @abstractmethod
+    def file_columns(self) -> list[str]:
+        pass
+
+    @property
+    @abstractmethod
+    def torrent_columns(self) -> list[str]:
+        pass
+
+    def get_torrents_cursor(self, arraysize=1000) -> Cursor:
+        select_cursor = self.connection.cursor()
+        select_cursor.arraysize = arraysize
+        select_cursor.execute(f"SELECT * FROM {self.torrents_table}")
+        return select_cursor
+
+    @abstractmethod
+    def merge_torrents(
+        self, torrents: list[dict]
+    ) -> dict[Union["inserted", "failed"], int]:
+        pass
+
+    @property
+    @abstractmethod
+    def placeholder(self):
+        pass
+
+
+class SQLite(Database):
+    def __init__(self, filename: str, source: SQLite = None):
+        if source is not None and not isinstance(source, SQLite):
+            raise NotImplemented("SQLite target can only use SQLite source")
+        super().__init__(filename, source)
+        # For type hints
+        self.source = source
+
+    def close(self):
+        if not self.merged_source:
+            super().close()
+
+    def connect(self, dsn: str) -> sqlite3.Connection:
+        if self.merged_source:
+            with self.source.connection:  # Shortcut available only in sqlite
+                self.source.connection.execute("ATTACH ? AS target_db", (dsn,))
+            return self.source.connection
         else:
-            raise click.ClickException(f"Unrecognized database {db_dsn}")
+            connection = sqlite3.connect(dsn)
+            connection.row_factory = sqlite3.Row
+            # Some name were inserted invalid. Correct them.
+            connection.text_factory = lambda x: x.decode("utf8", errors="replace")
+            return connection
 
-        return connection
-
-    def same_connection(self):
-        return self.main_connection is self.merged_connection
-
-    def get_total_merged(self):
-        if self.same_connection():
-            self.merged_cursor.execute("SELECT count(*) from merged_db.torrents")
-        else:
-            self.merged_cursor.execute("SELECT count(*) from torrents")
-        return self.merged_cursor.fetchone()[0]
-
-    def get_file_columns(self):
-        request = (
+    @cached_property
+    def file_columns(self):
+        self.cursor.execute(
             "SELECT name FROM pragma_table_info('files') WHERE name not in ('id', 'torrent_id')"
-            if self.main_type == "sqlite"
-            else """SELECT column_name AS name FROM information_schema.columns
+        )
+        return [row[0] for row in self.cursor]
+
+    @cached_property
+    def torrent_columns(self):
+        self.cursor.execute(
+            "SELECT name FROM pragma_table_info('torrents') WHERE name not in ('id')"
+        )
+        return [row[0] for row in self.cursor]
+
+    def merge_torrents(
+        self, torrents: list[dict]
+    ) -> dict[Union["inserted", "failed"], int]:
+        torrents_statement = f"""INSERT INTO target_db.torrents ({','.join(self.torrent_columns)})
+            VALUES ({','.join('?' * len(self.torrent_columns))}) ON CONFLICT DO NOTHING"""
+        files_statement = f"""INSERT INTO target_db.files (torrent_id, {','.join(self.file_columns)})
+        SELECT ?, {','.join(self.file_columns)} FROM files WHERE torrent_id = ?"""
+
+        failed = 0
+        inserted = 0
+        for torrent in torrents:
+            self.cursor.execute(
+                torrents_statement,
+                (*[torrent[column] for column in self.torrent_columns],),
+            )
+            inserted += 1
+            if self.cursor.lastrowid is None or self.cursor.lastrowid == 0:
+                failed += 1
+            else:
+                self.merge_files(files_statement, self.cursor.lastrowid, torrent["id"])
+        return {"failed": failed, "inserted": inserted}
+
+    def merge_files(self, statement: str, torrent_id: int, previous_torrent_id: int):
+        if self.merged_source:
+            self.cursor.execute(statement, (torrent_id, previous_torrent_id))
+
+    @property
+    def merged_source(self):
+        # Class is tested in __init__
+        return self.source is not None
+
+    @property
+    def placeholder(self):
+        return "?"
+
+
+class PostgreSQL(Database):
+    def __init__(self, dsn: str, source: SQLite = None):
+        if source is not None and not isinstance(source, SQLite):
+            raise NotImplemented("PostgreSQL target can only use SQLite source")
+        super().__init__(dsn, source)
+        # For type hints
+        self.source = source
+
+    def connect(self, dsn: str) -> psycopg2._psycopg.connection:
+        if psycopg2 is None:
+            raise click.ClickException("psycopg2 driver is missing")
+        return psycopg2.connect(dsn)
+
+    @cached_property
+    def file_columns(self):
+        self.cursor.execute(
+            """SELECT column_name AS name FROM information_schema.columns
             WHERE table_name = 'files' and column_name not in ('id', 'torrent_id')"""
         )
-        self.main_cursor.execute(request)
-        return [row[0] for row in self.main_cursor]
+        return [row[0] for row in self.cursor]
 
-    def get_torrent_columns(self):
-        request = (
-            "SELECT name FROM pragma_table_info('torrents') WHERE name not in ('id')"
-            if self.main_type == "sqlite"
-            else """SELECT column_name AS name FROM information_schema.columns
+    @cached_property
+    def torrent_columns(self):
+        self.cursor.execute(
+            """SELECT column_name AS name FROM information_schema.columns
             WHERE table_name = 'torrents' and column_name not in ('id')"""
         )
-        self.main_cursor.execute(request)
-        return [row[0] for row in self.main_cursor]
+        return [row[0] for row in self.cursor]
 
-    def prepare_inserts(self):
-        self.torrent_columns = self.get_torrent_columns()
-        if self.main_type == "pg":
-            self.insert_torrents_statement = f"""INSERT INTO torrents ({','.join(self.torrent_columns)})
+    def merge_torrents(
+        self, torrents: list[dict]
+    ) -> dict[Union["inserted", "failed"], int]:
+        torrents_statement = f"""INSERT INTO torrents ({','.join(self.torrent_columns)})
             VALUES %s ON CONFLICT DO NOTHING RETURNING id"""
-        else:
-            self.insert_torrents_statement = f"""INSERT INTO torrents ({','.join(self.torrent_columns)})
-            VALUES ({','.join('?' * len(self.torrent_columns))}) ON CONFLICT DO NOTHING"""
-
-        self.file_columns = self.get_file_columns()
-        if self.same_connection():
-            self.insert_files_statement = f"""INSERT INTO files (torrent_id, {','.join(self.file_columns)})
-            SELECT ?, {','.join(self.file_columns)} FROM merged_db.files WHERE torrent_id = ?"""
-        else:
-            if self.main_type == "pg":
-                # We will use execute_values with a single placeholder
-                self.insert_files_statement = f"""INSERT INTO files (torrent_id, {','.join(self.file_columns)})
-                VALUES %s ON CONFLICT DO NOTHING"""
-
-    def select_merged_torrents(self, arraysize=1000):
-        select_cursor = self.merged_connection.cursor()
-        select_cursor.arraysize = arraysize
-        select_cursor.execute(
-            "SELECT * FROM merged_db.torrents"
-            if self.same_connection()
-            else "SELECT * FROM torrents"
+        # We will use execute_values with a single placeholder
+        files_statement = f"""INSERT INTO files (torrent_id, {','.join(self.file_columns)})
+            VALUES %s ON CONFLICT DO NOTHING"""
+        try:
+            result = psycopg2.extras.execute_values(
+                self.cursor,
+                torrents_statement,
+                [
+                    (*[torrent[column] for column in self.torrent_columns],)
+                    for torrent in torrents
+                ],
+                fetch=True,
+            )
+        except ValueError as e:
+            if "0x00" in str(e):
+                return self.merge_torrents(self.remove_nul_bytes(torrents, "name"))
+        self.merge_files(
+            files_statement,
+            {
+                torrent["id"]: one_result[0]
+                for (one_result, torrent) in zip(result, torrents)
+                if one_result[0] is not None
+            },
         )
-        return select_cursor
+        return {"failed": result.count((None,)), "inserted": len(result)}
 
-    def select_merged_files(self, torrent_id: int, arraysize=1000):
-        select_cursor = self.merged_connection.cursor()
-        select_cursor.arraysize = arraysize
-        select_cursor.execute(
-            f"SELECT * FROM files where torrent_id = {self.placeholder(self.merged_type)}",
-            (torrent_id,),
-        )
-        return select_cursor
+    def merge_files(self, statement: str, torrent_ids: Dict[int, int]):
+        files_cursor = self.get_source_files_cursor(tuple(torrent_ids.keys()))
+        files_list = files_cursor.fetchmany()
+        while files_list:
+            try:
+                psycopg2.extras.execute_values(
+                    self.cursor,
+                    statement,
+                    [
+                        (
+                            torrent_ids[merged_file["torrent_id"]],
+                            *[merged_file[column] for column in self.file_columns],
+                        )
+                        for merged_file in files_list
+                    ],
+                )
+                files_list = files_cursor.fetchmany()
+            except ValueError as e:
+                if "0x00" in str(e):
+                    files_list = self.remove_nul_bytes(files_list, "path")
 
-    def select_merged_files_m(self, torrent_ids: Tuple[int], arraysize=1000):
-        select_cursor = self.merged_connection.cursor()
+    def get_source_files_cursor(self, torrent_ids: Tuple[int], arraysize=1000):
+        select_cursor = self.source.connection.cursor()
         select_cursor.arraysize = arraysize
         select_cursor.execute(
             f"""SELECT * FROM files WHERE torrent_id IN
-            ({','.join([self.placeholder(self.merged_type)] * len(torrent_ids))})""",
+            ({','.join([self.source.placeholder] * len(torrent_ids))})""",
             torrent_ids,
         )
         return select_cursor
@@ -217,84 +309,9 @@ class Merger:
             row[column] = row[column].replace("\x00", "")
         return rows
 
-    def merge_entries(
-        self, torrents: List[dict]
-    ) -> Dict[Union["inserted", "failed"], int]:
-        if self.main_type == "pg":
-            try:
-                result = psycopg2.extras.execute_values(
-                    self.main_cursor,
-                    self.insert_torrents_statement,
-                    [
-                        (*[torrent[column] for column in self.torrent_columns],)
-                        for torrent in torrents
-                    ],
-                    fetch=True,
-                )
-            except ValueError as e:
-                if "0x00" in str(e):
-                    return self.merge_entries(self.remove_nul_bytes(torrents, "name"))
-            self.merge_files_m(
-                {
-                    torrent["id"]: one_result[0]
-                    for (one_result, torrent) in zip(result, torrents)
-                    if one_result[0] is not None
-                }
-            )
-            return {"failed": result.count((None,)), "inserted": len(result)}
-        elif self.main_type == "sqlite":
-            failed = 0
-            inserted = 0
-            for torrent in torrents:
-                self.main_cursor.execute(
-                    self.insert_torrents_statement,
-                    (*[torrent[column] for column in self.torrent_columns],),
-                )
-                inserted += 1
-                if (
-                    self.main_cursor.lastrowid is None
-                    or self.main_cursor.lastrowid == 0
-                ):
-                    failed += 1
-                else:
-                    self.merge_files(self.main_cursor.lastrowid, torrent["id"])
-            return {"failed": failed, "inserted": inserted}
-        else:
-            raise click.ClickException("Not implemented")
-
-    def merge_files(self, torrent_id: int, previous_torrent_id: int):
-        if self.same_connection():
-            self.main_cursor.execute(
-                self.insert_files_statement, (torrent_id, previous_torrent_id)
-            )
-        else:
-            raise click.ClickException("Not supported")
-
-    def merge_files_m(self, torrent_ids: Dict[int, int]):
-        if self.main_type != "pg":
-            raise click.ClickException("Not supported")
-        select_cursor = self.select_merged_files_m(tuple(torrent_ids.keys()))
-        files_list = select_cursor.fetchmany()
-        while files_list:
-            try:
-                psycopg2.extras.execute_values(
-                    self.main_cursor,
-                    self.insert_files_statement,
-                    [
-                        (
-                            torrent_ids[merged_file["torrent_id"]],
-                            *[merged_file[column] for column in self.file_columns],
-                        )
-                        for merged_file in files_list
-                    ],
-                )
-                files_list = select_cursor.fetchmany()
-            except ValueError as e:
-                if "0x00" in str(e):
-                    files_list = self.remove_nul_bytes(files_list, "path")
-
-    def placeholder(self, db_type: str):
-        return "?" if db_type == "sqlite" else "%s"
+    @property
+    def placeholder(self):
+        return "%s"
 
 
 @click.command()
@@ -302,29 +319,31 @@ class Merger:
 @click.argument("merged-db")
 def main(main_db, merged_db):
     click.echo(f"Merging {merged_db} into {main_db}")
-    merger = Merger(main_db, merged_db)
+    source = Database.from_dsn(merged_db)
+    target = Database.from_dsn(main_db, source)
     click.echo("Gathering database statistics: ", nl=False)
 
-    total_merged = merger.get_total_merged()
+    total_merged = source.torrents_count
     click.echo(f"{total_merged} torrents to merge.")
     failed_count = 0
 
-    merger.main_cursor.execute("BEGIN")
+    target.cursor.execute("BEGIN")
     arraysize = 1000
     with click.progressbar(length=total_merged, width=0, show_pos=True) as bar:
-        torrents = merger.select_merged_torrents(arraysize)
-        results = merger.merge_entries(torrents.fetchmany())
+        torrents = source.get_torrents_cursor(arraysize)
+        results = target.merge_torrents(torrents.fetchmany())
         while results["inserted"] > 0:
             bar.update(results["inserted"])
             failed_count += results["failed"]
-            results = merger.merge_entries(torrents.fetchmany())
+            results = target.merge_torrents(torrents.fetchmany())
 
     click.echo("Comitting… ", nl=False)
-    merger.main_connection.commit()
+    target.connection.commit()
     click.echo(
         f"OK. {total_merged} torrents processed. {failed_count} torrents were not merged due to errors."
     )
-    merger.close()
+    source.close()
+    target.close()
 
 
 if __name__ == "__main__":
