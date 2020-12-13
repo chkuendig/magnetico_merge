@@ -288,9 +288,9 @@ class PostgreSQL(Database):
                 )
                 for statement in self.drop_contraint_statements:
                     self.cursor.execute(statement)
-
                 click.echo(" Done.")
 
+                # Collect indices after dropping constraints
                 self.indices = self.get_indices()
                 index_names = self.indices.keys()
                 click.echo(
@@ -298,15 +298,13 @@ class PostgreSQL(Database):
                     nl=False,
                 )
                 self.cursor.execute(f"DROP INDEX {','.join(index_names)}")
-
                 click.echo(" Done.")
 
     def after_import(self):
         with self.connection:
             if self.options.get("fast", False):
-                index_names = self.indices.keys()
                 click.echo(
-                    f"-> Postgresql target, recreating indices: {', '.join(index_names)}…",
+                    f"-> Postgresql target, recreating indices: {', '.join(self.indices.keys())}…",
                     nl=False,
                 )
                 for statement in self.indices.values():
