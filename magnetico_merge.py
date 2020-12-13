@@ -194,15 +194,17 @@ class SQLite(Database):
 
         failed = 0
         inserted = 0
+        processed = 0
         for torrent in torrents:
             self.cursor.execute(
                 torrents_statement,
                 (*[torrent[column] for column in self.torrent_columns],),
             )
-            inserted += 1
+            processed += 1
             if self.cursor.lastrowid is None or self.cursor.lastrowid == 0:
                 failed += 1
             else:
+                inserted += 1
                 self.merge_files(files_statement, self.cursor.lastrowid, torrent["id"])
         return {"failed": failed, "inserted": inserted}
 
@@ -364,7 +366,9 @@ class PostgreSQL(Database):
                 if one_result[0] is not None
             },
         )
-        return {"failed": result.count((None,)), "inserted": len(result)}
+        total = len(torrents)
+        inserted = len(result)
+        return {"failed": total - inserted, "inserted": inserted, "processed": total}
 
     def merge_files(self, statement: str, torrent_ids: Dict[int, int]):
         files_cursor = self.get_source_files_cursor(tuple(torrent_ids.keys()))
@@ -430,21 +434,31 @@ def main(main_db, merged_db, fast):
     click.echo(f"{total_merged} torrents to merge.")
     failed_count = 0
 
-    target.cursor.execute("BEGIN")
-    arraysize = 1000
-    with click.progressbar(length=total_merged, width=0, show_pos=True) as bar:
-        torrents = source.get_torrents_cursor(arraysize)
-        results = target.merge_torrents(torrents.fetchmany())
-        while results["inserted"] > 0:
-            bar.update(results["inserted"])
-            failed_count += results["failed"]
-            results = target.merge_torrents(torrents.fetchmany())
+    click.echo("-> Preparing target database")
+    target.before_import()
 
-    click.echo("Comitting… ", nl=False)
-    target.connection.commit()
-    click.echo(
-        f"OK. {total_merged} torrents processed. {failed_count} torrents were not merged due to errors."
-    )
+    try:
+        target.cursor.execute("BEGIN")
+        arraysize = 1000
+        with click.progressbar(length=total_merged, width=0, show_pos=True) as bar:
+            torrents = source.get_torrents_cursor(arraysize)
+            results = target.merge_torrents(torrents.fetchmany())
+            while results["processed"] > 0:
+                bar.update(results["processed"])
+                failed_count += results["failed"]
+                results = target.merge_torrents(torrents.fetchmany())
+
+        click.echo("Comitting… ", nl=False)
+        target.connection.commit()
+        click.echo(
+            f"OK. {total_merged} torrents processed. {failed_count} torrents were not merged due to errors."
+        )
+    except BaseException as e:
+        click.secho(f"Error while importing {str(e)}", fg="red")
+        target.connection.rollback()
+    finally:
+        target.after_import()
+
     source.close()
     target.close()
 
