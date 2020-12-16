@@ -15,8 +15,14 @@ import click
 try:
     import psycopg2
     import psycopg2.extras
+    import psycopg2.errorcodes
 except ImportError:
     psycopg2 = None
+
+try:
+    import pgcopy
+except ImportError:
+    pgcopy = None
 
 # 4204942: b'\x00\x00\x02\x0100\x00'
 # 10196786: b'\xff\xfe1\x00'
@@ -232,6 +238,7 @@ class PostgreSQL(Database):
         self.indices = {}
         self.create_contraint_statements = []
         self.drop_contraint_statements = []
+        self.copy_manager = None
 
     def connect(self, dsn: str) -> psycopg2._psycopg.connection:
         if psycopg2 is None:
@@ -299,6 +306,13 @@ class PostgreSQL(Database):
                 )
                 self.cursor.execute(f"DROP INDEX {','.join(index_names)}")
                 click.echo(" Done.")
+
+                if pgcopy is not None:
+                    self.copy_manager = pgcopy.CopyManager(
+                        self.connection, "files", ["torrent_id", *self.file_columns]
+                    )
+                else:
+                    click.secho("pgcopy not found, so it won't be as fast", fg="yellow")
 
     def after_import(self):
         with self.connection:
@@ -369,25 +383,52 @@ class PostgreSQL(Database):
         return {"failed": total - inserted, "inserted": inserted, "processed": total}
 
     def merge_files(self, statement: str, torrent_ids: Dict[int, int]):
+        if self.copy_manager is not None:
+            try:
+                self.cursor.execute("SAVEPOINT copy_files")
+                self.copy_manager.threading_copy(self.get_source_files(torrent_ids))
+            except psycopg2.DataError as error:
+                if error.pgcode == psycopg2.errorcodes.CHARACTER_NOT_IN_REPERTOIRE:
+                    self.cursor.execute("ROLLBACK TO copy_files")
+                    self.copy_manager.threading_copy(self.get_source_files(torrent_ids, True))
+                else:
+                    raise
+
+            self.cursor.execute("RELEASE SAVEPOINT copy_files")
+        else:
+            # Slow path, but try to be as fast as possible
+            files_cursor = self.get_source_files_cursor(tuple(torrent_ids.keys()))
+            files_list = files_cursor.fetchmany()
+            while files_list:
+                try:
+                    psycopg2.extras.execute_values(
+                        self.cursor,
+                        statement,
+                        [
+                            (
+                                torrent_ids[merged_file["torrent_id"]],
+                                *[merged_file[column] for column in self.file_columns],
+                            )
+                            for merged_file in files_list
+                        ],
+                    )
+                    files_list = files_cursor.fetchmany()
+                except ValueError as e:
+                    if "0x00" in str(e):
+                        files_list = self.remove_nul_bytes(files_list, "path")
+
+    def get_source_files(self, torrent_ids: Dict[int, int], fix_nul=False):
         files_cursor = self.get_source_files_cursor(tuple(torrent_ids.keys()))
         files_list = files_cursor.fetchmany()
         while files_list:
-            try:
-                psycopg2.extras.execute_values(
-                    self.cursor,
-                    statement,
-                    [
-                        (
-                            torrent_ids[merged_file["torrent_id"]],
-                            *[merged_file[column] for column in self.file_columns],
-                        )
-                        for merged_file in files_list
-                    ],
+            if fix_nul:
+                files_list = self.remove_nul_bytes(files_list, "path")
+            for merged_file in files_list:
+                yield (
+                    torrent_ids[merged_file["torrent_id"]],
+                    *[merged_file[column] for column in self.file_columns],
                 )
-                files_list = files_cursor.fetchmany()
-            except ValueError as e:
-                if "0x00" in str(e):
-                    files_list = self.remove_nul_bytes(files_list, "path")
+            files_list = files_cursor.fetchmany()
 
     def get_source_files_cursor(self, torrent_ids: Tuple[int], arraysize=1000):
         select_cursor = self.source.connection.cursor()

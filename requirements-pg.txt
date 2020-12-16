@@ -1,0 +1,3 @@
+psycopg2
+# Normally, pgcopy installs psycopg2, but it's optional for us
+pgcopy
