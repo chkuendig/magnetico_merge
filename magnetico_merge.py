@@ -445,7 +445,10 @@ class PostgreSQL(Database):
         # Make a dict copy to be able to modify it
         rows = [dict(row) for row in rows]
         for row in rows:
-            row[column] = row[column].replace("\x00", "")
+            old = row[column]
+            if isinstance(old, bytes):
+                old = old.decode('utf8', errors='replace')
+            row[column] = old.replace("\x00", "")
         return rows
 
     @property
