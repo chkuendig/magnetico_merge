@@ -27,6 +27,9 @@ except ImportError:
 # 4204942: b'\x00\x00\x02\x0100\x00'
 # 10196786: b'\xff\xfe1\x00'
 
+#  [#############################################################----------------]  4204000/14135209  05:42:40Removing null bytes from 1000 rows
+#  [################################################################-------------]  4416000/14135209  05:43:0
+
 """
 Schema:
 CREATE TABLE torrents (
@@ -369,7 +372,7 @@ class PostgreSQL(Database):
             )
         except ValueError as e:
             if "0x00" in str(e):
-                return self.merge_torrents(self.remove_nul_bytes(torrents, "name"))
+                return self.merge_torrents(self.fix_bytes(torrents, "name"))
         self.merge_files(
             files_statement,
             {
@@ -415,14 +418,14 @@ class PostgreSQL(Database):
                     files_list = files_cursor.fetchmany()
                 except ValueError as e:
                     if "0x00" in str(e):
-                        files_list = self.remove_nul_bytes(files_list, "path")
+                        files_list = self.fix_bytes(files_list, "path")
 
     def get_source_files(self, torrent_ids: Dict[int, int], fix_nul=False):
         files_cursor = self.get_source_files_cursor(tuple(torrent_ids.keys()))
         files_list = files_cursor.fetchmany()
         while files_list:
             if fix_nul:
-                files_list = self.remove_nul_bytes(files_list, "path")
+                files_list = self.fix_bytes(files_list, "path")
             for merged_file in files_list:
                 yield (
                     torrent_ids[merged_file["torrent_id"]],
@@ -440,8 +443,8 @@ class PostgreSQL(Database):
         )
         return select_cursor
 
-    def remove_nul_bytes(self, rows: List[dict], column: str):
-        click.secho(f"Removing null bytes from {len(rows)} rows", fg="yellow")
+    def fix_bytes(self, rows: List[dict], column: str):
+        click.secho(f"Fix bytes value from {len(rows)} rows in column {column}", fg="yellow")
         # Make a dict copy to be able to modify it
         rows = [dict(row) for row in rows]
         for row in rows:
@@ -498,6 +501,8 @@ def main(main_db, merged_db, fast):
     except BaseException as e:
         click.secho(f"Error while importing {str(e)}", fg="red")
         target.connection.rollback()
+        import traceback
+        traceback.print_exc()
     finally:
         target.after_import()
 
