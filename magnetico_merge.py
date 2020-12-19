@@ -393,7 +393,9 @@ class PostgreSQL(Database):
             except psycopg2.DataError as error:
                 if error.pgcode == psycopg2.errorcodes.CHARACTER_NOT_IN_REPERTOIRE:
                     self.cursor.execute("ROLLBACK TO copy_files")
-                    self.copy_manager.threading_copy(self.get_source_files(torrent_ids, True))
+                    self.copy_manager.threading_copy(
+                        self.get_source_files(torrent_ids, True)
+                    )
                 else:
                     raise
 
@@ -444,13 +446,15 @@ class PostgreSQL(Database):
         return select_cursor
 
     def fix_bytes(self, rows: List[dict], column: str):
-        click.secho(f"Fix bytes value from {len(rows)} rows in column {column}", fg="yellow")
+        click.secho(
+            f"Fix bytes value from {len(rows)} rows in column {column}", fg="yellow"
+        )
         # Make a dict copy to be able to modify it
         rows = [dict(row) for row in rows]
         for row in rows:
             old = row[column]
             if isinstance(old, bytes):
-                old = old.decode('utf8', errors='replace')
+                old = old.decode("utf8", errors="replace")
             row[column] = old.replace("\x00", "")
         return rows
 
@@ -502,6 +506,7 @@ def main(main_db, merged_db, fast):
         click.secho(f"Error while importing {str(e)}", fg="red")
         target.connection.rollback()
         import traceback
+
         traceback.print_exc()
     finally:
         target.after_import()
