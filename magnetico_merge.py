@@ -215,7 +215,8 @@ class SQLite(Database):
             else:
                 inserted += 1
                 self.merge_files(files_statement, self.cursor.lastrowid, torrent["id"])
-        return {"failed": failed, "inserted": inserted}
+
+        return {"failed": failed, "inserted": inserted, "processed": processed}
 
     def merge_files(self, statement: str, torrent_id: int, previous_torrent_id: int):
         if self.merged_source:
