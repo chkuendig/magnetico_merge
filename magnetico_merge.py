@@ -305,12 +305,12 @@ class PostgreSQL(Database):
                 self.cursor.execute(f"DROP INDEX {','.join(index_names)}")
                 click.echo(" Done.")
 
-                if pgcopy is not None:
-                    self.copy_manager = pgcopy.CopyManager(
-                        self.connection, "files", ["torrent_id", *self.file_columns]
-                    )
-                else:
-                    click.secho("pgcopy not found, so it won't be as fast", fg="yellow")
+            if pgcopy is not None:
+                self.copy_manager = pgcopy.CopyManager(
+                    self.connection, "files", ["torrent_id", *self.file_columns]
+                )
+            else:
+                click.secho("pgcopy not found, so it won't be as fast", fg="yellow")
 
     def after_import(self):
         with self.connection:
