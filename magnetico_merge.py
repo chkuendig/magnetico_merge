@@ -24,12 +24,6 @@ try:
 except ImportError:
     pgcopy = None
 
-# 4204942: b'\x00\x00\x02\x0100\x00'
-# 10196786: b'\xff\xfe1\x00'
-
-#  [#############################################################----------------]  4204000/14135209  05:42:40Removing null bytes from 1000 rows
-#  [################################################################-------------]  4416000/14135209  05:43:0
-
 """
 Schema:
 CREATE TABLE torrents (
@@ -468,7 +462,7 @@ class PostgreSQL(Database):
 @click.option(
     "--fast",
     is_flag=True,
-    help="Try to go faster, by deleting indices and removing WAL while importing. PostgreSQL only.",
+    help="Try to go faster, by deleting indices and constraints while importing. PostgreSQL only. This can be really slower if your databases overlapped a lot.",
 )
 @click.argument("main-db")
 @click.argument("merged-db")
