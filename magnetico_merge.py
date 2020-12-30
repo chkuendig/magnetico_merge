@@ -96,10 +96,10 @@ class Database(ABC):
         self.close()
 
     def close(self):
-        if self.cursor is not None:
+        if getattr(self, "cursor", None) is not None:
             self.cursor.close()
             self.cursor = None
-        if self.connection is not None:
+        if getattr(self, "connection", None) is not None:
             self.connection.close()
             self.connection = None
 
@@ -151,8 +151,9 @@ class Database(ABC):
 
 class SQLite(Database):
     def __init__(self, filename: str, source: SQLite = None):
+        self.source = None
         if source is not None and not isinstance(source, SQLite):
-            raise NotImplemented("SQLite target can only use SQLite source")
+            raise ValueError("SQLite target can only use SQLite source")
         super().__init__(filename, source)
         # For type hints
         self.source = source
@@ -468,8 +469,12 @@ class PostgreSQL(Database):
 @click.argument("merged-db")
 def main(main_db, merged_db, fast):
     click.echo(f"Merging {merged_db} into {main_db}")
-    source = Database.from_dsn(merged_db)
-    target = Database.from_dsn(main_db, source)
+    try:
+        source = Database.from_dsn(merged_db)
+        target = Database.from_dsn(main_db, source)
+    except Exception as e:
+        raise click.ClickException(e)
+        return
     target.set_options({"fast": fast})
 
     click.echo("-> Gathering source database statistics: ", nl=False)
