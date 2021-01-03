@@ -132,9 +132,13 @@ class Database(ABC):
         pass
 
     def get_torrents_cursor(self, arraysize=1000) -> Cursor:
+        select_cursor = self.select_cursor(arraysize)
+        select_cursor.execute(f"SELECT * FROM {self.torrents_table}")
+        return select_cursor
+
+    def select_cursor(self, arraysize: int) -> Cursor:
         select_cursor = self.connection.cursor()
         select_cursor.arraysize = arraysize
-        select_cursor.execute(f"SELECT * FROM {self.torrents_table}")
         return select_cursor
 
     @abstractmethod
@@ -152,8 +156,8 @@ class Database(ABC):
 class SQLite(Database):
     def __init__(self, filename: str, source: SQLite = None):
         self.source = None
-        if source is not None and not isinstance(source, SQLite):
-            raise ValueError("SQLite target can only use SQLite source")
+        if source is not None and not isinstance(source, (SQLite, PostgreSQL)):
+            raise ValueError("SQLite target can only use SQLite or PostgreSQL source")
         super().__init__(filename, source)
         # For type hints
         self.source = source
@@ -165,7 +169,7 @@ class SQLite(Database):
     def connect(self, dsn: str) -> sqlite3.Connection:
         if self.merged_source:
             with self.source.connection:  # Shortcut available only in sqlite
-                self.source.connection.execute("ATTACH ? AS target_db", (dsn,))
+                self.source.connection.execute(f"ATTACH ? AS {self.target_db}", (dsn,))
             return self.source.connection
         else:
             connection = sqlite3.connect(dsn)
@@ -188,13 +192,17 @@ class SQLite(Database):
         )
         return [row[0] for row in self.cursor]
 
+    @property
+    def target_db(self):
+        return "target_db" if self.merged_source else "main"
+
     def merge_torrents(
         self, torrents: list[dict]
     ) -> dict[Union["inserted", "failed"], int]:
-        torrents_statement = f"""INSERT INTO target_db.torrents ({','.join(self.torrent_columns)})
-            VALUES ({','.join('?' * len(self.torrent_columns))}) ON CONFLICT DO NOTHING"""
-        files_statement = f"""INSERT INTO target_db.files (torrent_id, {','.join(self.file_columns)})
-        SELECT ?, {','.join(self.file_columns)} FROM files WHERE torrent_id = ?"""
+        torrents_statement = f"""INSERT INTO {self.target_db}.torrents ({','.join(self.source.torrent_columns)})
+            VALUES ({','.join('?' * len(self.source.torrent_columns))}) ON CONFLICT DO NOTHING"""
+        files_statement = f"""INSERT INTO {self.target_db}.files (torrent_id, {','.join(self.source.file_columns)})
+        SELECT ?, {','.join(self.source.file_columns)} FROM files WHERE torrent_id = ?"""
 
         failed = 0
         inserted = 0
@@ -202,7 +210,7 @@ class SQLite(Database):
         for torrent in torrents:
             self.cursor.execute(
                 torrents_statement,
-                (*[torrent[column] for column in self.torrent_columns],),
+                (*[torrent[column] for column in self.source.torrent_columns],),
             )
             processed += 1
             if self.cursor.lastrowid is None or self.cursor.lastrowid == 0:
@@ -220,7 +228,7 @@ class SQLite(Database):
     @property
     def merged_source(self):
         # Class is tested in __init__
-        return self.source is not None
+        return isinstance(self.source, SQLite)
 
     @property
     def placeholder(self):
@@ -238,11 +246,12 @@ class PostgreSQL(Database):
         self.create_contraint_statements = []
         self.drop_contraint_statements = []
         self.copy_manager = None
+        self.named_cursor_count = 0
 
     def connect(self, dsn: str) -> psycopg2._psycopg.connection:
         if psycopg2 is None:
             raise click.ClickException("psycopg2 driver is missing")
-        return psycopg2.connect(dsn)
+        return psycopg2.connect(dsn, cursor_factory=psycopg2.extras.DictCursor)
 
     def generate_constraint_statements(self):
         # See https://blog.hagander.net/automatically-dropping-and-creating-constraints-131/
@@ -347,6 +356,12 @@ class PostgreSQL(Database):
             WHERE table_name = 'torrents' and column_name not in ('id')"""
         )
         return [row[0] for row in self.cursor]
+
+    def select_cursor(self, arraysize: int) -> Cursor:
+        self.named_cursor_count += 1
+        select_cursor = self.connection.cursor(name=f"select_{self.named_cursor_count}")
+        select_cursor.arraysize = arraysize
+        return select_cursor
 
     def merge_torrents(
         self, torrents: list[dict]
@@ -489,6 +504,7 @@ def main(main_db, merged_db, fast):
     try:
         target.cursor.execute("BEGIN")
         arraysize = 1000
+        click.echo(f"-> Starting transaction, iterating with {arraysize} torrents")
         with click.progressbar(length=total_merged, width=0, show_pos=True) as bar:
             torrents = source.get_torrents_cursor(arraysize)
             results = target.merge_torrents(torrents.fetchmany())
