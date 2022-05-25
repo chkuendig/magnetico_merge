@@ -225,7 +225,7 @@ class SQLite(Database):
                 inserted += 1
                 self.merge_files(files_statement, self.cursor.lastrowid, torrent["id"])
 
-        return {"failed": failed, "inserted": inserted, "processed": processed}
+        return {"failed": failed, "inserted": inserted, "processed": processed, "last": torrents[-1]}
 
     def merge_files(self, statement: str, torrent_id: int, previous_torrent_id: int):
         if self.merged_source:
@@ -400,7 +400,7 @@ class PostgreSQL(Database):
         )
         total = len(torrents)
         inserted = len(result)
-        return {"failed": total - inserted, "inserted": inserted, "processed": total}
+        return {"failed": total - inserted, "inserted": inserted, "processed": total, "last": torrents[-1]}
 
     def merge_files(self, statement: str, torrent_ids: Dict[int, int]):
         if self.copy_manager is not None:
@@ -524,6 +524,10 @@ def main(main_db, merged_db, fast, stripped_files):
                 bar.update(results["processed"])
                 failed_count += results["failed"]
                 results = target.merge_torrents(torrents.fetchmany())
+
+            if stripped_files:
+                last_id = results['last']['id']
+                click.echo(f"Last merged torrent id is {last_id}. You can strip your merged database with 'DELETE FROM files WHERE torrent_id <= \'{last_id}\''")
 
         click.echo("Comitting… ", nl=False)
         target.connection.commit()
