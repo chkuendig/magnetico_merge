@@ -117,8 +117,14 @@ class Database(ABC):
         pass
 
     @property
+    def stripped_files_constraint(self) -> str:
+        if self.options.get("stripped_files", False):
+            return f"WHERE (SELECT count(*) FROM files WHERE {self.torrents_table}.id = files.torrent_id) > 0"
+        return ""
+
+    @property
     def torrents_count(self) -> int:
-        self.cursor.execute("SELECT count(*) from torrents")
+        self.cursor.execute(f"SELECT count(*) from {self.torrents_table} {self.stripped_files_constraint}")
         return self.cursor.fetchone()[0]
 
     @property
@@ -133,7 +139,7 @@ class Database(ABC):
 
     def get_torrents_cursor(self, arraysize=1000) -> Cursor:
         select_cursor = self.select_cursor(arraysize)
-        select_cursor.execute(f"SELECT * FROM {self.torrents_table}")
+        select_cursor.execute(f"SELECT * FROM {self.torrents_table} {self.stripped_files_constraint}")
         return select_cursor
 
     def select_cursor(self, arraysize: int) -> Cursor:
@@ -480,9 +486,14 @@ class PostgreSQL(Database):
     is_flag=True,
     help="Try to go faster, by deleting indices and constraints while importing. PostgreSQL only. This can be really slower if your databases overlapped a lot.",
 )
+@click.option(
+    "--stripped-files",
+    is_flag=True,
+    help="Assume that the merged database has a stripped down 'files' table, and only merge torrents that have at least some files.",
+)
 @click.argument("main-db")
 @click.argument("merged-db")
-def main(main_db, merged_db, fast):
+def main(main_db, merged_db, fast, stripped_files):
     click.echo(f"Merging {merged_db} into {main_db}")
     try:
         source = Database.from_dsn(merged_db)
@@ -490,6 +501,7 @@ def main(main_db, merged_db, fast):
     except Exception as e:
         raise click.ClickException(e)
         return
+    source.set_options({"stripped_files": stripped_files})
     target.set_options({"fast": fast})
 
     click.echo("-> Gathering source database statistics: ", nl=False)
