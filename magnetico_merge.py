@@ -225,7 +225,7 @@ class SQLite(Database):
                 inserted += 1
                 self.merge_files(files_statement, self.cursor.lastrowid, torrent["id"])
 
-        return {"failed": failed, "inserted": inserted, "processed": processed, "last": torrents[-1]}
+        return {"failed": failed, "inserted": inserted, "processed": processed, "last": torrents[-1] if len(torrents) > 0 else None}
 
     def merge_files(self, statement: str, torrent_id: int, previous_torrent_id: int):
         if self.merged_source:
@@ -400,7 +400,7 @@ class PostgreSQL(Database):
         )
         total = len(torrents)
         inserted = len(result)
-        return {"failed": total - inserted, "inserted": inserted, "processed": total, "last": torrents[-1]}
+        return {"failed": total - inserted, "inserted": inserted, "processed": total, "last": torrents[-1] if len(torrents) > 0 else None}
 
     def merge_files(self, statement: str, torrent_ids: Dict[int, int]):
         if self.copy_manager is not None:
