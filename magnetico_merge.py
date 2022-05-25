@@ -535,6 +535,8 @@ def main(main_db, merged_db, fast, stripped_files):
         with click.progressbar(length=total_merged, width=0, show_pos=True) as bar:
             torrents = source.get_torrents_cursor(arraysize)
             results = target.merge_torrents(torrents.fetchmany())
+            if results["last"] is not None:
+                last_torrent = results["last"]
             while results["processed"] > 0:
                 bar.update(results["processed"])
                 failed_count += results["failed"]
@@ -547,7 +549,7 @@ def main(main_db, merged_db, fast, stripped_files):
         click.echo(
             f"OK. {total_merged} torrents processed. {failed_count} torrents were not merged due to errors."
         )
-        if stripped_files:
+        if stripped_files and last_torrent is not None:
             last_id = last_torrent["id"]
             click.echo(
                 f"Last merged torrent id is {last_id}. You can strip your merged database with 'DELETE FROM files WHERE torrent_id <= '{last_id}''"
