@@ -124,7 +124,9 @@ class Database(ABC):
 
     @property
     def torrents_count(self) -> int:
-        self.cursor.execute(f"SELECT count(*) from {self.torrents_table} {self.stripped_files_constraint}")
+        self.cursor.execute(
+            f"SELECT count(*) from {self.torrents_table} {self.stripped_files_constraint}"
+        )
         return self.cursor.fetchone()[0]
 
     @property
@@ -139,7 +141,9 @@ class Database(ABC):
 
     def get_torrents_cursor(self, arraysize=1000) -> Cursor:
         select_cursor = self.select_cursor(arraysize)
-        select_cursor.execute(f"SELECT * FROM {self.torrents_table} {self.stripped_files_constraint}")
+        select_cursor.execute(
+            f"SELECT * FROM {self.torrents_table} {self.stripped_files_constraint}"
+        )
         return select_cursor
 
     def select_cursor(self, arraysize: int) -> Cursor:
@@ -225,7 +229,12 @@ class SQLite(Database):
                 inserted += 1
                 self.merge_files(files_statement, self.cursor.lastrowid, torrent["id"])
 
-        return {"failed": failed, "inserted": inserted, "processed": processed, "last": torrents[-1] if len(torrents) > 0 else None}
+        return {
+            "failed": failed,
+            "inserted": inserted,
+            "processed": processed,
+            "last": torrents[-1] if len(torrents) > 0 else None,
+        }
 
     def merge_files(self, statement: str, torrent_id: int, previous_torrent_id: int):
         if self.merged_source:
@@ -400,7 +409,12 @@ class PostgreSQL(Database):
         )
         total = len(torrents)
         inserted = len(result)
-        return {"failed": total - inserted, "inserted": inserted, "processed": total, "last": torrents[-1] if len(torrents) > 0 else None}
+        return {
+            "failed": total - inserted,
+            "inserted": inserted,
+            "processed": total,
+            "last": torrents[-1] if len(torrents) > 0 else None,
+        }
 
     def merge_files(self, statement: str, torrent_ids: Dict[int, int]):
         if self.copy_manager is not None:
@@ -526,8 +540,10 @@ def main(main_db, merged_db, fast, stripped_files):
                 results = target.merge_torrents(torrents.fetchmany())
 
             if stripped_files:
-                last_id = results['last']['id']
-                click.echo(f"Last merged torrent id is {last_id}. You can strip your merged database with 'DELETE FROM files WHERE torrent_id <= \'{last_id}\''")
+                last_id = results["last"]["id"]
+                click.echo(
+                    f"Last merged torrent id is {last_id}. You can strip your merged database with 'DELETE FROM files WHERE torrent_id <= '{last_id}''"
+                )
 
         click.echo("Comitting… ", nl=False)
         target.connection.commit()
