@@ -105,6 +105,10 @@ class Database(ABC):
 
     def set_options(self, options: dict = {}):
         self.options = options
+        if self.options.get("stripped_files", False):
+            # Create an index that is very useful when counting files.
+            # In the full schema the readme_index cover torrent_id column, so this is not needed.
+            self.cursor.execute('CREATE INDEX IF NOT EXISTS torrent_id_index ON files (torrent_id)')
 
     @abstractmethod
     def connect(self, dsn: str) -> Connection:
